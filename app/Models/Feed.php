@@ -613,6 +613,8 @@ class FreshRSS_Feed extends Minz_Model {
 					throw new FreshRSS_Feed_Exception('For that domain, will first retry after ' . date('c', $retryAfter) .
 						'. ' . $this->url(includeCredentials: false), code: 503);
 				}
+				// Reserve the configured per-domain rate-limit slot before fetching.
+				FreshRSS_http_Util::applyDomainRateLimit($this->url, $this->proxyParam());
 				$simplePie = new FreshRSS_SimplePieCustom($this->attributes(), $this->curlOptions());
 				$url = htmlspecialchars_decode($this->url, ENT_QUOTES);
 				if (str_ends_with($url, '#force_feed')) {

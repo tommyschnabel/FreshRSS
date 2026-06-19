@@ -10,6 +10,13 @@ final class FreshRSS_http_Util {
 		if (!is_string($domain) || $domain === '') {
 			return '';
 		}
+		// If a configurable per-domain rate limit matches, share a single bucket across all
+		// subdomains/feeds of that domain (ignoring port and path), so the rate limit is domain-wide.
+		$rateLimitDomain = self::matchRateLimitDomain($domain);
+		if ($rateLimitDomain !== '') {
+			return self::RETRY_AFTER_PATH . urlencode($rateLimitDomain) .
+				(empty($proxy) ? '' : '_' . urlencode($proxy)) . '.txt';
+		}
 		$domainWide = Minz_Request::serverIsPublic($domain);
 		$port = parse_url($url, PHP_URL_PORT);
 		if (is_int($port)) {
@@ -85,6 +92,88 @@ final class FreshRSS_http_Util {
 			return 0;
 		}
 		return $retryAfter;
+	}
+
+	/**
+	 * Normalised map of the configured proactive per-domain rate limits.
+	 * @return array<string,int> Map of lowercase domain => positive number of seconds between requests.
+	 */
+	private static function rateLimits(): array {
+		if (!FreshRSS_Context::hasSystemConf()) {
+			return [];
+		}
+		$raw = FreshRSS_Context::systemConf()->limits['rate_limits'] ?? null;
+		if (!is_array($raw)) {
+			return [];
+		}
+		$result = [];
+		foreach ($raw as $domain => $seconds) {
+			$domain = strtolower(trim((string)$domain));
+			$seconds = (int)$seconds;
+			if ($domain !== '' && $seconds > 0) {
+				$result[$domain] = $seconds;
+			}
+		}
+		return $result;
+	}
+
+	/**
+	 * Pure matching of a host against a set of configured rate-limited domains.
+	 * A configured domain matches the host itself and any of its subdomains
+	 * (e.g. `reddit.com` matches `www.reddit.com` and `old.reddit.com`).
+	 * @param array<string,int> $rateLimits Map of lowercase domain => seconds.
+	 * @return string The most specific (longest) matching configured domain, or '' if none.
+	 */
+	public static function findRateLimitDomain(string $host, array $rateLimits): string {
+		$host = strtolower($host);
+		$best = '';
+		foreach (array_keys($rateLimits) as $domain) {
+			$domain = (string)$domain;
+			if (($host === $domain || str_ends_with($host, '.' . $domain)) && strlen($domain) > strlen($best)) {
+				$best = $domain;	// Prefer the most specific (longest) match
+			}
+		}
+		return $best;
+	}
+
+	private static function matchRateLimitDomain(string $host): string {
+		return self::findRateLimitDomain($host, self::rateLimits());
+	}
+
+	/**
+	 * Get the configured proactive rate limit (in seconds) for the domain of the given URL.
+	 * @return int Minimum number of seconds between two requests to that domain, or 0 if none configured.
+	 */
+	public static function getDomainRateLimit(string $url): int {
+		$host = parse_url($url, PHP_URL_HOST);
+		if (!is_string($host) || $host === '') {
+			return 0;
+		}
+		$domain = self::matchRateLimitDomain($host);
+		return $domain === '' ? 0 : (self::rateLimits()[$domain] ?? 0);
+	}
+
+	/**
+	 * Proactively enforce a configured per-domain rate limit by reserving a `Retry-After` period
+	 * for the domain of the given URL. This reuses the same machinery as the HTTP `Retry-After`
+	 * header, so the next request to that domain (any feed or subdomain) will be deferred.
+	 * Only ever extends an existing (e.g. longer, server-imposed) `Retry-After` period.
+	 * To be called right before making an HTTP request, once `getRetryAfter()` has passed.
+	 */
+	public static function applyDomainRateLimit(string $url, string $proxy): void {
+		$seconds = self::getDomainRateLimit($url);
+		if ($seconds <= 0) {
+			return;
+		}
+		$txt = self::getRetryAfterFile($url, $proxy);
+		if ($txt === '') {
+			return;
+		}
+		$retryAfter = max(@filemtime($txt) ?: 0, time() + $seconds);
+		@mkdir(self::RETRY_AFTER_PATH);
+		if (!touch($txt, $retryAfter)) {
+			Minz_Log::warning('Failed to set rate limit for ' . \SimplePie\Misc::url_remove_credentials($url));
+		}
 	}
 
 	/**
@@ -308,6 +397,8 @@ final class FreshRSS_http_Util {
 			Minz_Log::warning('For that domain, will first retry after ' . date('c', $retryAfter) . '. ' . \SimplePie\Misc::url_remove_credentials($url));
 			return ['body' => '', 'effective_url' => $url, 'redirect_count' => 0, 'fail' => true, 'status' => -429, 'error' => ''];
 		}
+		// A real request is about to be made: reserve the configured per-domain rate-limit slot.
+		FreshRSS_http_Util::applyDomainRateLimit($url, $proxy);
 
 		if (FreshRSS_Context::systemConf()->simplepie_syslog_enabled) {
 			syslog(LOG_INFO, 'FreshRSS GET ' . $type . ' ' . \SimplePie\Misc::url_remove_credentials($url));

@@ -122,6 +122,13 @@ return [
 		# Maximal rate limit duration (in seconds), overriding HTTP response header `Retry-After`.
 		'retry_after_max' => 172800,
 
+		# Proactive per-domain rate limits, as a map of domain => minimum number of seconds between
+		# two HTTP requests to that domain (across all feeds and subdomains of that domain).
+		# Useful for sources that enforce strict rate limits, e.g. Reddit allowing one request per minute.
+		# A domain also matches its subdomains: `reddit.com` covers `www.reddit.com`, `old.reddit.com`, etc.
+		# Example: 'rate_limits' => [ 'reddit.com' => 60 ],
+		'rate_limits' => [],
+
 		# SimplePie HTTP request timeout in seconds.
 		'timeout' => 20,
 
